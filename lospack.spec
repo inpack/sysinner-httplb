@@ -1,4 +1,4 @@
-project.name = los-httplb
+project.name = los-httplb-keeper
 project.version = 0.0.2
 project.vendor = lessos.com
 project.homepage = http://www.lessos.com
@@ -9,7 +9,7 @@ project.description = lessOS HTTP Load Balancer
 
 mkdir -p {{.buildroot}}/bin
 
-time go build -ldflags "-w -s" -o {{.buildroot}}/bin/los-httplbd ./main.go
+time go build -ldflags "-w -s" -o {{.buildroot}}/bin/los-httplb-keeper ./main.go
 
 %files
 README.md
