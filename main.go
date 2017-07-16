@@ -68,7 +68,8 @@ server {
 %s
 
 %s
-}`
+}
+`
 )
 
 func main() {
@@ -313,7 +314,7 @@ func do() {
 				}
 			}
 
-			for _, sp := range inst.Operate.Ports {
+			for _, sp := range inst.Operate.Replica.Ports {
 
 				if sp.Name != "http" && sp.Name != "https" {
 					continue

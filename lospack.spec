@@ -1,5 +1,5 @@
 project.name = los-httplb-keeper
-project.version = 0.0.2
+project.version = 0.0.3
 project.vendor = lessos.com
 project.homepage = http://www.lessos.com
 project.groups = dev/sys-srv
