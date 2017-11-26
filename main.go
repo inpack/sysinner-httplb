@@ -133,7 +133,7 @@ func do() {
 
 	for _, app := range inst.Apps {
 
-		if app.Spec.Meta.Name != "sysinner-httplb" {
+		if app.Spec.Meta.ID != "sysinner-httplb" {
 			continue
 		}
 
