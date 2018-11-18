@@ -52,11 +52,11 @@ upstream %s {
     }`
 	ngx_location_redirect_http_tpl = `
     location %s {
-        rewrite ^/(.*)$ %s permanent;
+        rewrite ^%s(.*)$ %s$1 permanent;
     }`
 	ngx_location_redirect_path_tpl = `
     location %s {
-		rewrite ^/(.*)$ $scheme://$host%s permanent;
+		rewrite ^%s(.*)$ $scheme://$host%s$1 permanent;
     }`
 	ngx_server_tpl = `
 server {
@@ -202,7 +202,7 @@ func do() {
 					var bups []string
 					for _, v := range nsz.Services {
 
-						if v.Port != uint16(port) {
+						if v.Port != uint32(port) {
 							continue
 						}
 
@@ -305,9 +305,11 @@ func do() {
 			})
 			for _, v := range locations {
 				if strings.HasPrefix(v.Value, "redirect:http") {
-					locs = append(locs, fmt.Sprintf(ngx_location_redirect_http_tpl, v.Key, v.Value[len("redirect:"):]))
+					locs = append(locs, fmt.Sprintf(ngx_location_redirect_http_tpl,
+						v.Key, v.Key, v.Value[len("redirect:"):]))
 				} else if strings.HasPrefix(v.Value, "redirect:") {
-					locs = append(locs, fmt.Sprintf(ngx_location_redirect_path_tpl, v.Key, v.Value[len("redirect:"):]))
+					locs = append(locs, fmt.Sprintf(ngx_location_redirect_path_tpl,
+						v.Key, v.Key, v.Value[len("redirect:"):]))
 				} else {
 					locs = append(locs, fmt.Sprintf(ngx_location_tpl, v.Key, v.Value))
 				}
