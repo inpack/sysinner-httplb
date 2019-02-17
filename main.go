@@ -91,9 +91,9 @@ func do() {
 	if err != nil || pid == 0 {
 
 		if _, err = exec.Command(ngx_bin_path).Output(); err != nil {
-			fmt.Println(err)
+			hlog.Printf("error", "setup err %s", err.Error())
 		} else {
-			fmt.Println("http started")
+			hlog.Printf("info", "server started")
 		}
 		return
 	}
@@ -122,14 +122,13 @@ func do() {
 
 		appCfr = podCfr.AppConfigurator("sysinner-httplb")
 		if appCfr == nil {
-			hlog.Print("error", "No AppSpec (sysinner-pgsql) Found")
+			hlog.Print("error", "No AppSpec (sysinner-httplb) Found")
 			return
 		}
 	}
 
 	var (
-		proc_reload = false
-		// nss         = map[string]inapi.NsPodServiceMap{}
+		procReload = false
 	)
 
 	for _, res := range appCfr.App.Operate.Options {
@@ -317,7 +316,7 @@ func do() {
 
 		fpconf, err := os.OpenFile(fmt.Sprintf(ngx_conf_file, domain), os.O_RDWR|os.O_CREATE, 0644)
 		if err != nil {
-			fmt.Println(err)
+			hlog.Printf("error", "setup err %s", err.Error())
 			continue
 		}
 		defer fpconf.Close()
@@ -327,24 +326,23 @@ func do() {
 
 		_, err = fpconf.WriteString(ngx_conf)
 		if err != nil {
-			fmt.Println(err)
+			hlog.Printf("error", "setup err %s", err.Error())
 		}
 
-		proc_reload = true
-		fmt.Println("conf done")
+		procReload = true
 	}
 
-	if proc_reload {
+	if procReload {
 
 		if _, err := exec.Command("kill", "-s", "HUP", strconv.Itoa(pid)).Output(); err != nil {
-			fmt.Println(err)
+			hlog.Printf("info", "server reload err %s", err.Error())
 			return
 		}
 
-		fmt.Println("http reloaded")
+		hlog.Printf("info", "server reload")
 	}
 
 	pgPodCfr = podCfr
 
-	fmt.Println("time", time.Since(tstart))
+	hlog.Printf("info", "config in %v", time.Since(tstart))
 }

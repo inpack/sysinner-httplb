@@ -9,6 +9,7 @@ description = SysInner HTTP Load Balancer
 %build
 
 mkdir -p {{.buildroot}}/bin
+mkdir -p {{.buildroot}}/log
 
 time go build -ldflags "-w -s" -o {{.buildroot}}/bin/sysinner-httplb ./main.go
 
