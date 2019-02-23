@@ -32,9 +32,9 @@ import (
 )
 
 var (
-	ngx_bin_path  = "/home/action/apps/openresty/bin/nginx"
-	ngx_pidfile   = "/home/action/apps/openresty/var/run.openresty.pid"
-	ngx_conf_file = "/home/action/apps/openresty/conf/conf.d/%s.conf"
+	ngx_bin_path  = "/opt/openresty/openresty/bin/nginx"
+	ngx_pidfile   = "/opt/openresty/openresty/var/run.openresty.pid"
+	ngx_conf_file = "/opt/openresty/openresty/conf/conf.d/%s.conf"
 
 	ngx_upstream_tpl = `
 upstream %s {
