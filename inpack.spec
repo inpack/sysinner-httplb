@@ -1,6 +1,6 @@
 [project]
 name = sysinner-httplb
-version = 0.9.0
+version = 0.9.1
 vendor = sysinner.com
 homepage = http://www.sysinner.com
 groups = dev/sys-srv

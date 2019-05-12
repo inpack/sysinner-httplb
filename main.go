@@ -67,6 +67,7 @@ server {
 }
 `
 	pgPodCfr *inconf.PodConfigurator
+	configs  = map[string]string{}
 )
 
 func main() {
@@ -79,11 +80,9 @@ func main() {
 
 func do() {
 
-	fpbin, err := os.Open(ngx_bin_path)
-	if err != nil {
+	if _, err := os.Stat(ngx_bin_path); err != nil {
 		return
 	}
-	fpbin.Close()
 
 	//
 	pidout, err := exec.Command("pgrep", "-f", ngx_bin_path).Output()
@@ -130,6 +129,8 @@ func do() {
 	var (
 		procReload = false
 	)
+
+	// hlog.Printf("info", "App Options %d", len(appCfr.App.Operate.Options))
 
 	for _, res := range appCfr.App.Operate.Options {
 
@@ -314,12 +315,15 @@ func do() {
 			)
 		}
 
+		if pv, ok := configs[domain]; ok && pv == ngx_conf {
+			continue
+		}
+
 		fpconf, err := os.OpenFile(fmt.Sprintf(ngx_conf_file, domain), os.O_RDWR|os.O_CREATE, 0644)
 		if err != nil {
 			hlog.Printf("error", "setup err %s", err.Error())
 			continue
 		}
-		defer fpconf.Close()
 
 		fpconf.Seek(0, 0)
 		fpconf.Truncate(0)
@@ -329,7 +333,11 @@ func do() {
 			hlog.Printf("error", "setup err %s", err.Error())
 		}
 
+		fpconf.Sync()
+		fpconf.Close()
+
 		procReload = true
+		configs[domain] = ngx_conf
 	}
 
 	if procReload {
@@ -339,10 +347,8 @@ func do() {
 			return
 		}
 
-		hlog.Printf("info", "server reload")
+		hlog.Printf("info", "server reload in %v", time.Since(tstart))
 	}
 
 	pgPodCfr = podCfr
-
-	hlog.Printf("info", "config in %v", time.Since(tstart))
 }
