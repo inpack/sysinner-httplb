@@ -1,0 +1,17 @@
+[project]
+name = "sysinner-httplb"
+version = "0.9.2"
+vendor = "sysinner.com"
+homepage = "http://www.sysinner.com"
+description = "SysInner HTTP Load Balancer"
+groups = ["dev/sys-srv"]
+
+[files]
+allow = """README.md
+LICENSE"""
+
+[scripts]
+build = """mkdir -p {{.buildroot}}/bin
+mkdir -p {{.buildroot}}/log
+time go build -ldflags \"-w -s\" -o {{.buildroot}}/bin/sysinner-httplb ./main.go
+"""
