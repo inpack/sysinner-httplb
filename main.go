@@ -41,7 +41,7 @@ var (
 	ngx_conf_dir      = "/opt/openresty/openresty/conf/conf.d"
 	ngx_conf_file     = ngx_conf_dir + "/%s.conf"
 	ngx_conf_tls_file = ngx_conf_dir + "/%s.tls.conf"
-	tls_cache_dir     = "/opt/openresty/openresty/var/tls_cache"
+	tlsCacheDir       = "/opt/openresty/openresty/var/tls_cache"
 
 	ngx_upstream_tpl = `
 upstream %s {
@@ -86,7 +86,7 @@ server {
 
 func main() {
 
-	os.MkdirAll(tls_cache_dir, 0755)
+	os.MkdirAll(tlsCacheDir, 0755)
 
 	for {
 
@@ -108,7 +108,7 @@ func httpsRefresh() error {
 
 		for _, v := range tlsDomainSet {
 
-			_, err := os.Stat(tls_cache_dir + "/" + v)
+			_, err := os.Stat(tlsCacheDir + "/" + v)
 			if err != nil {
 				continue
 			}
@@ -154,20 +154,19 @@ func httpsRefresh() error {
 
 		certManager := autocert.Manager{
 			Prompt:     autocert.AcceptTOS,
-			Cache:      autocert.DirCache(tls_cache_dir),
+			Cache:      autocert.DirCache(tlsCacheDir),
 			HostPolicy: autocert.HostWhitelist(tlsDomainSet...),
 		}
 
-		/**
 		tlsServer = &http.Server{
 			Addr:    ":1080",
 			Handler: certManager.HTTPHandler(nil),
 		}
 		go func() {
-			err := tlsServer.ListenAndServe()
-			// http.ListenAndServe(":1080", certManager.HTTPHandler(nil))
+			if err := tlsServer.ListenAndServe(); err != nil {
+				hlog.Printf("error", "tls refresh failed : %s", err.Error())
+			}
 		}()
-		*/
 
 		tlsDomainCache = tlsDomainSet
 
@@ -179,12 +178,14 @@ func httpsRefresh() error {
 			},
 		}
 		go func() {
-			err := tlsServerTLS.ListenAndServeTLS("", "")
-			hlog.Printf("error", "tls refresh failed : %s", err.Error())
+			if err := tlsServerTLS.ListenAndServeTLS("", ""); err != nil {
+				hlog.Printf("error", "tls refresh failed : %s", err.Error())
+			}
 			tlsDomainCache = nil
 		}()
 
-		hlog.Printf("info", "tls refresh %d", len(tlsDomainSet))
+		hlog.Printf("info", "tls refresh %d, domains %s",
+			len(tlsDomainSet), strings.Join(tlsDomainSet, ","))
 	}
 
 	return nil
@@ -445,8 +446,8 @@ func httpRefresh() {
 
 					/**
 					tlsCfg += fmt.Sprintf("    ssl on;\n")
-					tlsCfg += fmt.Sprintf("    ssl_certificate     %s/%s;\n", tls_cache_dir, domain)
-					tlsCfg += fmt.Sprintf("    ssl_certificate_key %s/%s;\n", tls_cache_dir, domain)
+					tlsCfg += fmt.Sprintf("    ssl_certificate     %s/%s;\n", tlsCacheDir, domain)
+					tlsCfg += fmt.Sprintf("    ssl_certificate_key %s/%s;\n", tlsCacheDir, domain)
 					tlsCfg += fmt.Sprintf("    ssl_protocols       TLSv1 TLSv1.1 TLSv1.2 TLSv1.3;\n")
 					tlsCfg += fmt.Sprintf("    ssl_ciphers         HIGH:!aNULL:!MD5;\n")
 					*/
