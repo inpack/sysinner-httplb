@@ -1,0 +1,59 @@
+kind = "AppSpec"
+roles = [101, 100]
+type_tags = ["net"]
+
+[meta]
+  id = "sysinner-httplb"
+  name = "Http Load Balancer "
+  version = "1.0"
+  subtitle = "高性能 http 负载均衡服务"
+
+[[packages]]
+  name = "openresty"
+  version = "1.17"
+
+[[packages]]
+  name = "sysinner-httplb"
+  version = "0.10"
+
+[[executors]]
+  name = "main"
+  exec_start = """if pidof sysinner-httplb; then
+    exit 0
+fi
+
+mkdir -p /opt/openresty/openresty/
+rsync -av {{.inpack_prefix_openresty}}/* /opt/openresty/openresty/
+
+mkdir -p /opt/sysinner/httplb/
+rsync -av {{.inpack_prefix_sysinner_httplb}}/* /opt/sysinner/httplb/
+
+/opt/sysinner/httplb/bin/sysinner-httplb -log_dir=/opt/sysinner/httplb/log -minloglevel=1 -logtolevels=true > /dev/null 2>&1 &
+"""
+
+  exec_stop = "killall sysinner-httplb"
+  priority = 8
+
+  [executors.plan]
+    on_tick = 60
+
+[[service_ports]]
+  name = "http"
+  box_port = 8080
+  host_port = 80
+
+[[service_ports]]
+  name = "https"
+  box_port = 8443
+  host_port = 443
+
+[exp_res]
+  cpu_min = 1
+  mem_min = 64
+  vol_min = 1
+
+[exp_deploy]
+  rep_min = 1
+  rep_max = 4
+  sys_state = 1
+  network_mode = 1
