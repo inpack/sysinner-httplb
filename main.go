@@ -17,79 +17,148 @@ package main
 import (
 	"crypto/tls"
 	"fmt"
+	mrand "math/rand"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hooto/hlog4g/hlog"
 	"github.com/lessos/lessgo/types"
-	"github.com/sysinner/incore/inconf"
 	"golang.org/x/crypto/acme/autocert"
+
+	"github.com/sysinner/incore/inconf"
+)
+
+type PodEntry struct {
+	Domain string           `json:"domain"`
+	Routes []*PodEntryRoute `json:"routes"`
+	Status string           `json:"status"`
+}
+
+type PodEntryRoute struct {
+	Type string     `json:"type"`
+	Path string     `json:"path"`
+	Urls []*url.URL `json:"urls"`
+}
+
+var (
+	errBody404 = []byte(`<html>
+<head><title>404 Not Found</title></head>
+<body bgcolor="white">
+  <center><h1>404 Not Found</h1></center>
+  <hr><center>InnerStack PaaS Engine</center>
+</body>
+</html>
+`)
 )
 
 var (
-	ngx_bin_path      = "/opt/openresty/openresty/bin/nginx"
-	ngx_pidfile       = "/opt/openresty/openresty/var/run.openresty.pid"
-	ngx_conf_dir      = "/opt/openresty/openresty/conf/conf.d"
-	ngx_conf_file     = ngx_conf_dir + "/%s.conf"
-	ngx_conf_tls_file = ngx_conf_dir + "/%s.tls.conf"
-	tlsCacheDir       = "/opt/openresty/openresty/var/tls_cache"
+	tlsCacheDir = "/opt/sysinner/httplb/var/tls_cache"
 
-	ngx_upstream_tpl = `
-upstream %s {
-%s
-}`
-	ngx_location_tpl = `
-    location %s {
-        proxy_pass          %s://%s;
-        proxy_set_header    Host             $host;
-        proxy_set_header    X-Real-IP        $remote_addr;
-        proxy_set_header    X-Forwarded-For  $proxy_add_x_forwarded_for;
-        proxy_http_version  1.1;
-        proxy_set_header    Upgrade          $http_upgrade;
-        proxy_set_header    Connection       $connection_upgrade;
-    }`
-	ngx_location_redirect_http_tpl = `
-    location %s {
-        rewrite ^%s(.*)$ %s$1 permanent;
-    }`
-	ngx_location_redirect_path_tpl = `
-    location %s {
-        rewrite ^%s(.*)$ $scheme://$host%s$1 permanent;
-    }`
-	ngx_server_tpl = `
-server {
-    listen      %s;
-    server_name %s;
-
-    client_max_body_size 64M;
-%s
-
-%s
-}
-`
 	pgPodCfr       *inconf.PodConfigurator
-	configs        = map[string]string{}
 	tlsDomainSet   = []string{}
-	tlsDomainConf  = []string{}
 	tlsDomainCache = []string{}
 	tlsConfSets    = map[string]string{}
 	tlsServer      *http.Server
 	tlsServerTLS   *http.Server
-	tlsUpstreamUrl = &url.URL{Scheme: "http", Host: "127.0.0.1:8080"}
+
+	podm sync.RWMutex
+	pods = map[string]*PodEntry{}
+
+	certManager autocert.Manager
 )
+
+func init() {
+	mrand.Seed(time.Now().UnixNano())
+}
 
 func main() {
 
-	os.MkdirAll(tlsCacheDir, 0755)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+
+		/**
+		r.Proto = "HTTP/1.1"
+		r.ProtoMajor = 1
+		r.ProtoMinor = 1
+		*/
+
+		if pod := getPod(r.Host); pod != nil {
+			urlpath := filepath.Clean(r.URL.Path)
+			if runtime.GOOS == "windows" {
+				urlpath = strings.Replace(urlpath, "\\", "/", -1)
+			}
+			// urlpath = strings.Trim(urlpath, "/")
+
+			for _, route := range pod.Routes {
+
+				if !strings.HasPrefix(urlpath, route.Path) {
+					continue
+				}
+
+				switch route.Type {
+
+				case "pod", "upstream":
+					for _, u := range route.Urls {
+						p := httputil.NewSingleHostReverseProxy(u)
+						p.ServeHTTP(w, r)
+						return
+					}
+
+				case "redirect":
+					w.Header().Set("Location", route.Urls[0].String())
+					w.WriteHeader(http.StatusFound)
+					return
+				}
+			}
+		}
+
+		w.WriteHeader(404)
+		w.Write(errBody404)
+	})
+
+	os.MkdirAll(tlsCacheDir, 0750)
+
+	// tlsDomainSet = []string{"www.sysinner.cn"}
+
+	certManager = autocert.Manager{
+		Prompt:     autocert.AcceptTOS,
+		Cache:      autocert.DirCache(tlsCacheDir),
+		HostPolicy: autocert.HostWhitelist(tlsDomainSet...),
+	}
+
+	tlsServer = &http.Server{
+		Addr:    ":8080",
+		Handler: certManager.HTTPHandler(nil),
+	}
+	go func() {
+		if err := tlsServer.ListenAndServe(); err != nil {
+			hlog.Printf("error", "tls refresh failed : %s", err.Error())
+		}
+	}()
+
+	tlsServerTLS = &http.Server{
+		Addr:    ":8443",
+		Handler: mux,
+		TLSConfig: &tls.Config{
+			GetCertificate: certManager.GetCertificate,
+		},
+	}
+	go func() {
+		if err := tlsServerTLS.ListenAndServeTLS("", ""); err != nil {
+			hlog.Printf("error", "tls refresh failed : %s", err.Error())
+		}
+		tlsDomainCache = nil
+	}()
 
 	for {
 
@@ -101,92 +170,23 @@ func main() {
 	}
 }
 
+func getPod(domain string) *PodEntry {
+	podm.RLock()
+	defer podm.RUnlock()
+	pod, ok := pods[domain]
+	if ok {
+		return pod
+	}
+	return nil
+}
+
 func httpsRefresh() error {
 
-	if len(tlsDomainSet) == 0 {
-		return nil
-	}
-
-	if false && types.ArrayStringHit(tlsDomainConf, tlsDomainSet) != len(tlsDomainSet) {
-
-		for _, v := range tlsDomainSet {
-
-			_, err := os.Stat(tlsCacheDir + "/" + v)
-			if err != nil {
-				continue
-			}
-
-			cfg, ok := tlsConfSets[v]
-			if !ok {
-				continue
-			}
-
-			err = fileSync(fmt.Sprintf(ngx_conf_tls_file, v), cfg)
-			if err != nil {
-				continue
-			}
-
-			tlsDomainConf, _ = types.ArrayStringSet(tlsDomainConf, v)
-		}
-	}
-
-	if types.ArrayStringHit(tlsDomainCache, tlsDomainSet) != len(tlsDomainSet) {
-
-		if tlsServer != nil {
-			tlsServer.Close()
-		}
-
-		if tlsServerTLS != nil {
-			tlsServerTLS.Close()
-		}
-
-		time.Sleep(1e9)
-
-		mux := http.NewServeMux()
-		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-
-			/**
-			r.Proto = "HTTP/1.1"
-			r.ProtoMajor = 1
-			r.ProtoMinor = 1
-			*/
-
-			p := httputil.NewSingleHostReverseProxy(tlsUpstreamUrl)
-			p.ServeHTTP(w, r)
-		})
-
-		certManager := autocert.Manager{
-			Prompt:     autocert.AcceptTOS,
-			Cache:      autocert.DirCache(tlsCacheDir),
-			HostPolicy: autocert.HostWhitelist(tlsDomainSet...),
-		}
-
-		tlsServer = &http.Server{
-			Addr:    ":1080",
-			Handler: certManager.HTTPHandler(nil),
-		}
-		go func() {
-			if err := tlsServer.ListenAndServe(); err != nil {
-				hlog.Printf("error", "tls refresh failed : %s", err.Error())
-			}
-		}()
-
+	if len(tlsDomainSet) > 0 &&
+		types.ArrayStringHit(tlsDomainCache, tlsDomainSet) != len(tlsDomainSet) {
+		//
+		certManager.HostPolicy = autocert.HostWhitelist(tlsDomainSet...)
 		tlsDomainCache = tlsDomainSet
-
-		tlsServerTLS = &http.Server{
-			Addr:    ":8443",
-			Handler: mux,
-			TLSConfig: &tls.Config{
-				GetCertificate: certManager.GetCertificate,
-			},
-		}
-		go func() {
-			if err := tlsServerTLS.ListenAndServeTLS("", ""); err != nil {
-				hlog.Printf("error", "tls refresh failed : %s", err.Error())
-			}
-			tlsDomainCache = nil
-		}()
-
 		hlog.Printf("info", "tls refresh %d, domains %s",
 			len(tlsDomainSet), strings.Join(tlsDomainSet, ","))
 	}
@@ -196,27 +196,13 @@ func httpsRefresh() error {
 
 func httpRefresh() {
 
-	if _, err := os.Stat(ngx_bin_path); err != nil {
-		return
-	}
-
-	//
-	pidout, err := exec.Command("pgrep", "-f", ngx_bin_path).Output()
-	pid, _ := strconv.Atoi(strings.TrimSpace(string(pidout)))
-	if err != nil || pid == 0 {
-
-		if _, err = exec.Command(ngx_bin_path).Output(); err != nil {
-			hlog.Printf("error", "setup err %s", err.Error())
-		} else {
-			hlog.Printf("info", "server started")
-		}
-		return
-	}
+	podm.Lock()
+	defer podm.Unlock()
 
 	var (
-		tstart = time.Now()
 		podCfr *inconf.PodConfigurator
 		appCfr *inconf.AppConfigurator
+		err    error
 	)
 
 	{
@@ -242,10 +228,6 @@ func httpRefresh() {
 		}
 	}
 
-	var (
-		procReload = false
-	)
-
 	tlsDomainSet = []string{}
 
 	// hlog.Printf("info", "App Options %d", len(appCfr.App.Operate.Options))
@@ -258,10 +240,11 @@ func httpRefresh() {
 
 		//
 		var (
-			domain         = string(res.Name)[len("res/domain/"):]
-			upstreams      = types.KvPairs{}
-			locations      = types.KvPairs{}
-			optLetsencrypt = false
+			domain         = strings.ToLower(string(res.Name)[len("res/domain/"):])
+			optLetsEncrypt = false
+			podEntry       = &PodEntry{
+				Domain: domain,
+			}
 		)
 
 		// location
@@ -269,7 +252,7 @@ func httpRefresh() {
 
 			if strings.HasPrefix(bound.Name, "option/letsencrypt_enable") {
 				if bound.Value == "on" {
-					optLetsencrypt = true
+					optLetsEncrypt = true
 				}
 				continue
 			}
@@ -305,8 +288,7 @@ func httpRefresh() {
 					continue
 				}
 
-				// upstreams
-				var bups []string
+				var urls []*url.URL
 				for _, v := range podCfr.Pod.Operate.BindServices {
 
 					if v.PodId == "" || v.PodId != vs[0] {
@@ -318,25 +300,28 @@ func httpRefresh() {
 					}
 
 					for _, vh := range v.Endpoints {
-						bups = append(bups, fmt.Sprintf("    server %s:%d weight=1 max_fails=2 fail_timeout=10s;", vh.Ip, vh.Port))
+						urls = append(urls, &url.URL{
+							Scheme: "http",
+							Host:   fmt.Sprintf("%s:%d", vh.Ip, vh.Port),
+						})
 					}
 
 					break
 				}
 
-				if len(bups) > 0 {
-					upsname := fmt.Sprintf("sysinner_nsz_%s_%s_%d",
-						domain,
-						vs[0],
-						port,
-					)
-					upstreams.Set(upsname, strings.Join(bups, "\n"))
-					locations.Set(location, upsname)
+				if len(urls) > 0 {
+					podEntry.Routes = append(podEntry.Routes, &PodEntryRoute{
+						Path: location,
+						Type: bvtype,
+						Urls: urls,
+					})
 				}
 
 			case "upstream":
-				ups := strings.Split(bvvalue, ";")
-				var bups []string
+				var (
+					ups  = strings.Split(bvvalue, ";")
+					urls []*url.URL
+				)
 				for _, upv := range ups {
 
 					upvs := strings.Split(upv, ":")
@@ -348,20 +333,22 @@ func httpRefresh() {
 						continue
 					}
 					upport, err := strconv.Atoi(upvs[1])
-					if err != nil || upport < 80 || upport > 65505 {
+					if err != nil || upport < 1 || upport > 65505 {
 						continue
 					}
 
-					bups = append(bups, fmt.Sprintf("    server %s:%d weight=1 max_fails=2 fail_timeout=10s;", upvs[0], upport))
+					urls = append(urls, &url.URL{
+						Scheme: "http",
+						Host:   fmt.Sprintf("%s:%d", upvs[0], upport),
+					})
 				}
 
-				if len(bups) > 0 {
-					upsname := fmt.Sprintf("sysinner_ups_%s_%s",
-						domain,
-						strings.Replace(location, "/", "_", -1),
-					)
-					upstreams.Set(upsname, strings.Join(bups, "\n"))
-					locations.Set(location, upsname)
+				if len(urls) > 0 {
+					podEntry.Routes = append(podEntry.Routes, &PodEntryRoute{
+						Path: location,
+						Type: bvtype,
+						Urls: urls,
+					})
 				}
 
 			case "redirect":
@@ -379,146 +366,30 @@ func httpRefresh() {
 					continue
 				}
 
-				locations.Set(location, "redirect:"+uri.String())
+				podEntry.Routes = append(podEntry.Routes, &PodEntryRoute{
+					Path: location,
+					Type: bvtype,
+					Urls: []*url.URL{uri},
+				})
 			}
 		}
 
 		//
-		if len(upstreams) == 0 && len(locations) == 0 {
+		if len(podEntry.Routes) == 0 {
 			continue
-		}
-
-		var (
-			ups  = []string{}
-			locs = []string{}
-		)
-
-		ngx_conf := "# generated by sysinner http load balancer\n"
-		ngx_conf += "# DO NOT EDIT!\n"
-
-		// upstreams
-		if len(upstreams) > 0 {
-
-			sort.Slice(upstreams, func(i, j int) bool {
-				return upstreams[i].Key > upstreams[j].Key
-			})
-			for _, v := range upstreams {
-				ups = append(ups, fmt.Sprintf(ngx_upstream_tpl, v.Key, v.Value))
-			}
-
-			ngx_conf += strings.Join(ups, "\n")
-			ngx_conf += "\n"
 		}
 
 		// locations
-		sort.Slice(locations, func(i, j int) bool {
-			return locations[i].Key > locations[j].Key
+		sort.Slice(podEntry.Routes, func(i, j int) bool {
+			return strings.Compare(podEntry.Routes[i].Path, podEntry.Routes[j].Path) > 0
 		})
-		for _, v := range locations {
-			if strings.HasPrefix(v.Value, "redirect:http") {
-				locs = append(locs, fmt.Sprintf(ngx_location_redirect_http_tpl,
-					v.Key, v.Key, v.Value[len("redirect:"):]))
-			} else if strings.HasPrefix(v.Value, "redirect:") {
-				locs = append(locs, fmt.Sprintf(ngx_location_redirect_path_tpl,
-					v.Key, v.Key, v.Value[len("redirect:"):]))
-			} else {
-				locs = append(locs, fmt.Sprintf(ngx_location_tpl, v.Key, "http", v.Value))
-			}
-		}
 
-		for _, sp := range podCfr.Pod.Replica.Ports {
-
-			if sp.Name != "http" && sp.Name != "https" {
-				continue
-			}
-
-			tlsCfg := ""
-			listen := fmt.Sprintf("%d", sp.BoxPort)
-
-			if optLetsencrypt {
-				if sp.Name == "http" {
-					locs = append([]string{fmt.Sprintf(ngx_location_tpl, "/.well-known", "http", "127.0.0.1:1080")}, locs...)
-					// locs = []string{fmt.Sprintf(ngx_location_tpl, "/", "http", "127.0.0.1:1080")}
-				} else if sp.Name == "https" {
-
-					// locs = append([]string{fmt.Sprintf(ngx_location_tpl, "/", "127.0.0.1:1443")}, locs...)
-					// locs = []string{fmt.Sprintf(ngx_location_tpl, "/", "https", "127.0.0.1:1443")}
-
-					// listen += " ssl http2"
-					// listen += " ssl"
-
-					/**
-					tlsCfg += fmt.Sprintf("    ssl on;\n")
-					tlsCfg += fmt.Sprintf("    ssl_certificate     %s/%s;\n", tlsCacheDir, domain)
-					tlsCfg += fmt.Sprintf("    ssl_certificate_key %s/%s;\n", tlsCacheDir, domain)
-					tlsCfg += fmt.Sprintf("    ssl_protocols       TLSv1 TLSv1.1 TLSv1.2 TLSv1.3;\n")
-					tlsCfg += fmt.Sprintf("    ssl_ciphers         HIGH:!aNULL:!MD5;\n")
-					*/
-				}
-			}
-
-			cfg := fmt.Sprintf(
-				ngx_server_tpl,
-				listen,
-				domain,
-				tlsCfg,
-				strings.Join(locs, "\n"),
-			)
-
-			if sp.Name == "https" {
-				tlsConfSets[domain] = cfg
-			} else {
-				ngx_conf += cfg
-			}
-		}
-
-		if pv, ok := configs[domain]; ok && pv == ngx_conf {
-			continue
-		}
-
-		if err := fileSync(fmt.Sprintf(ngx_conf_file, domain), ngx_conf); err != nil {
-			hlog.Printf("error", "setup err %s", err.Error())
-			continue
-		}
-
-		procReload = true
-		configs[domain] = ngx_conf
-
-		if optLetsencrypt {
+		if optLetsEncrypt {
 			tlsDomainSet, _ = types.ArrayStringSet(tlsDomainSet, domain)
 		}
-	}
 
-	if procReload {
-
-		if _, err := exec.Command("kill", "-s", "HUP", strconv.Itoa(pid)).Output(); err != nil {
-			hlog.Printf("info", "server reload err %s", err.Error())
-			return
-		}
-
-		hlog.Printf("info", "server reload in %v", time.Since(tstart))
+		pods[domain] = podEntry
 	}
 
 	pgPodCfr = podCfr
-
-	time.Sleep(1e9)
-}
-
-func fileSync(file, body string) error {
-
-	fp, err := os.OpenFile(file, os.O_RDWR|os.O_CREATE, 0644)
-	if err != nil {
-		return err
-	}
-	defer fp.Close()
-
-	fp.Seek(0, 0)
-	fp.Truncate(0)
-
-	_, err = fp.WriteString(body)
-	if err != nil {
-		return err
-	}
-
-	return fp.Sync()
 }
