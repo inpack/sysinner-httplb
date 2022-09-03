@@ -1,6 +1,6 @@
 [project]
 name = "sysinner-httplb"
-version = "0.11.0"
+version = "0.11.1"
 vendor = "sysinner.com"
 homepage = "http://www.sysinner.com"
 description = "SysInner HTTP Load Balancer"
@@ -13,5 +13,5 @@ LICENSE"""
 [scripts]
 build = """mkdir -p {{.buildroot}}/bin
 mkdir -p {{.buildroot}}/log
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -ldflags \"-w -s\" -o {{.buildroot}}/bin/sysinner-httplb ./main.go
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -ldflags \"-w -s -X main.version={{.project__version}}" -o {{.buildroot}}/bin/sysinner-httplb ./main.go
 """

@@ -15,6 +15,8 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"crypto/tls"
 	"fmt"
 	mrand "math/rand"
@@ -68,67 +70,129 @@ var (
 	tlsDomainSet   = []string{}
 	tlsDomainCache = []string{}
 	tlsConfSets    = map[string]string{}
-	tlsServer      *http.Server
-	tlsServerTLS   *http.Server
+	httpServer     *http.Server
+	httpsServer    *http.Server
 
 	podm sync.RWMutex
 	pods = map[string]*PodEntry{}
 
 	certManager autocert.Manager
+
+	version = "0.11"
 )
 
 func init() {
 	mrand.Seed(time.Now().UnixNano())
 }
 
+type compressWriter struct {
+	http.ResponseWriter
+	gzipWriter *gzip.Writer
+	buf        *bytes.Buffer
+	statusCode int
+}
+
+func (w *compressWriter) Write(b []byte) (int, error) {
+
+	if w.gzipWriter == nil &&
+		w.Header().Get("Content-Encoding") == "gzip" {
+		return w.ResponseWriter.Write(b)
+	}
+
+	if w.buf == nil {
+		w.buf = &bytes.Buffer{}
+	}
+
+	if w.gzipWriter == nil {
+		w.gzipWriter = gzip.NewWriter(w.buf)
+	}
+
+	return w.gzipWriter.Write(b)
+}
+
+func (w *compressWriter) WriteHeader(statusCode int) {
+	if statusCode > w.statusCode {
+		w.statusCode = statusCode
+	}
+}
+
+func cmpHandler(fn http.HandlerFunc) http.HandlerFunc {
+
+	return func(w http.ResponseWriter, r *http.Request) {
+
+		if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			fn(w, r)
+			return
+		}
+
+		cw := &compressWriter{
+			ResponseWriter: w,
+		}
+
+		fn(cw, r)
+
+		if cw.gzipWriter != nil {
+			cw.gzipWriter.Flush()
+			cw.gzipWriter.Close()
+			w.Header().Set("Content-Encoding", "gzip")
+		}
+
+		if cw.buf != nil && cw.buf.Len() > 0 {
+			w.Header().Set("Content-Length", strconv.Itoa(cw.buf.Len()))
+			if cw.statusCode > 0 {
+				w.WriteHeader(cw.statusCode)
+			}
+			w.Write(cw.buf.Bytes())
+		}
+	}
+}
+
+func httpHandler(w http.ResponseWriter, r *http.Request) {
+
+	w.Header().Set("X-Proxy", "InnerStack/"+version)
+
+	if pod := getPod(r.Host); pod != nil {
+		//
+		urlpath := filepath.Clean(r.URL.Path)
+		if runtime.GOOS == "windows" {
+			urlpath = strings.Replace(urlpath, "\\", "/", -1)
+		}
+		// urlpath = strings.Trim(urlpath, "/")
+
+		for _, route := range pod.Routes {
+
+			if !strings.HasPrefix(urlpath, route.Path) {
+				continue
+			}
+
+			switch route.Type {
+
+			case "pod", "upstream":
+				for _, u := range route.Urls {
+					p := httputil.NewSingleHostReverseProxy(u)
+					p.ServeHTTP(w, r)
+					return
+				}
+
+			case "redirect":
+				w.Header().Set("Location", route.Urls[0].String())
+				w.WriteHeader(http.StatusFound)
+				return
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", "text/html")
+	w.Write(errBody404)
+	w.WriteHeader(404)
+}
+
 func main() {
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-
-		/**
-		r.Proto = "HTTP/1.1"
-		r.ProtoMajor = 1
-		r.ProtoMinor = 1
-		*/
-
-		if pod := getPod(r.Host); pod != nil {
-			urlpath := filepath.Clean(r.URL.Path)
-			if runtime.GOOS == "windows" {
-				urlpath = strings.Replace(urlpath, "\\", "/", -1)
-			}
-			// urlpath = strings.Trim(urlpath, "/")
-
-			for _, route := range pod.Routes {
-
-				if !strings.HasPrefix(urlpath, route.Path) {
-					continue
-				}
-
-				switch route.Type {
-
-				case "pod", "upstream":
-					for _, u := range route.Urls {
-						p := httputil.NewSingleHostReverseProxy(u)
-						p.ServeHTTP(w, r)
-						return
-					}
-
-				case "redirect":
-					w.Header().Set("Location", route.Urls[0].String())
-					w.WriteHeader(http.StatusFound)
-					return
-				}
-			}
-		}
-
-		w.WriteHeader(404)
-		w.Write(errBody404)
-	})
+	mux.HandleFunc("/", cmpHandler(httpHandler))
 
 	os.MkdirAll(tlsCacheDir, 0750)
-
-	// tlsDomainSet = []string{"www.sysinner.cn"}
 
 	certManager = autocert.Manager{
 		Prompt:     autocert.AcceptTOS,
@@ -136,17 +200,17 @@ func main() {
 		HostPolicy: autocert.HostWhitelist(tlsDomainSet...),
 	}
 
-	tlsServer = &http.Server{
+	httpServer = &http.Server{
 		Addr:    ":8080",
 		Handler: certManager.HTTPHandler(nil),
 	}
 	go func() {
-		if err := tlsServer.ListenAndServe(); err != nil {
-			hlog.Printf("error", "tls refresh failed : %s", err.Error())
+		if err := httpServer.ListenAndServe(); err != nil {
+			hlog.Printf("error", "http-server start failed : %s", err.Error())
 		}
 	}()
 
-	tlsServerTLS = &http.Server{
+	httpsServer = &http.Server{
 		Addr:    ":8443",
 		Handler: mux,
 		TLSConfig: &tls.Config{
@@ -154,19 +218,15 @@ func main() {
 		},
 	}
 	go func() {
-		if err := tlsServerTLS.ListenAndServeTLS("", ""); err != nil {
-			hlog.Printf("error", "tls refresh failed : %s", err.Error())
+		if err := httpsServer.ListenAndServeTLS("", ""); err != nil {
+			hlog.Printf("error", "https-server start failed : %s", err.Error())
 		}
 		tlsDomainCache = nil
 	}()
 
 	for {
-
 		time.Sleep(3e9)
-
-		httpRefresh()
-
-		httpsRefresh()
+		configRefresh()
 	}
 }
 
@@ -180,21 +240,7 @@ func getPod(domain string) *PodEntry {
 	return nil
 }
 
-func httpsRefresh() error {
-
-	if len(tlsDomainSet) > 0 &&
-		types.ArrayStringHit(tlsDomainCache, tlsDomainSet) != len(tlsDomainSet) {
-		//
-		certManager.HostPolicy = autocert.HostWhitelist(tlsDomainSet...)
-		tlsDomainCache = tlsDomainSet
-		hlog.Printf("info", "tls refresh %d, domains %s",
-			len(tlsDomainSet), strings.Join(tlsDomainSet, ","))
-	}
-
-	return nil
-}
-
-func httpRefresh() {
+func configRefresh() {
 
 	podm.Lock()
 	defer podm.Unlock()
@@ -392,4 +438,13 @@ func httpRefresh() {
 	}
 
 	pgPodCfr = podCfr
+
+	if len(tlsDomainSet) > 0 &&
+		types.ArrayStringHit(tlsDomainCache, tlsDomainSet) != len(tlsDomainSet) {
+		//
+		certManager.HostPolicy = autocert.HostWhitelist(tlsDomainSet...)
+		tlsDomainCache = tlsDomainSet
+		hlog.Printf("info", "tls refresh %d, domains %s",
+			len(tlsDomainSet), strings.Join(tlsDomainSet, ","))
+	}
 }
