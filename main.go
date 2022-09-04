@@ -143,6 +143,13 @@ func cmpHandler(fn http.HandlerFunc) http.HandlerFunc {
 				w.WriteHeader(cw.statusCode)
 			}
 			w.Write(cw.buf.Bytes())
+		} else if uri := w.Header().Get("Location"); uri != "" &&
+			w.Header().Get("Content-Type") == "" {
+			if cw.statusCode >= 300 && cw.statusCode < 310 {
+				w.WriteHeader(cw.statusCode)
+			} else {
+				w.WriteHeader(http.StatusFound)
+			}
 		}
 	}
 }
