@@ -79,6 +79,7 @@ var (
 	certManager autocert.Manager
 
 	version = "0.11"
+	release = "0"
 )
 
 func init() {
@@ -150,6 +151,8 @@ func cmpHandler(fn http.HandlerFunc) http.HandlerFunc {
 			} else {
 				w.WriteHeader(http.StatusFound)
 			}
+		} else if cw.statusCode > 0 {
+			w.WriteHeader(cw.statusCode)
 		}
 	}
 }
