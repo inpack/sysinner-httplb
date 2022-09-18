@@ -1,4 +1,5 @@
 *.txz
 .build_bin
 go.sum
+main
 

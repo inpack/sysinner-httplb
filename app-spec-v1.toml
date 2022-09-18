@@ -1,5 +1,6 @@
 kind = "AppSpec"
 roles = [101, 100]
+runtime_images = ["sysinner/innerstack-g3:el8"]
 type_tags = ["net"]
 
 [meta]
@@ -9,31 +10,23 @@ type_tags = ["net"]
   subtitle = "高性能 http 负载均衡服务"
 
 [[packages]]
-  name = "openresty"
-  version = "1.19"
-
-[[packages]]
   name = "sysinner-httplb"
-  version = "0.10"
+  version = "0.11"
 
 [[executors]]
   name = "main"
+  updated = 0
   exec_start = """if pidof sysinner-httplb; then
     exit 0
 fi
 
-mkdir -p /opt/openresty/openresty/
-rsync -av {{.inpack_prefix_openresty}}/* /opt/openresty/openresty/
-
-mkdir -p /opt/sysinner/httplb/
 rsync -av {{.inpack_prefix_sysinner_httplb}}/* /opt/sysinner/httplb/
 
-/opt/sysinner/httplb/bin/sysinner-httplb -log_dir=/opt/sysinner/httplb/log -minloglevel=1 -logtolevels=true > /dev/null 2>&1 &
+/opt/sysinner/httplb/bin/sysinner-httplb -log_dir=/opt/sysinner/httplb/var/log -minloglevel=1 -logtolevels=true > /dev/null 2>&1 &
 """
 
   exec_stop = "killall sysinner-httplb"
   priority = 8
-
   [executors.plan]
     on_tick = 60
 
@@ -49,11 +42,12 @@ rsync -av {{.inpack_prefix_sysinner_httplb}}/* /opt/sysinner/httplb/
 
 [exp_res]
   cpu_min = 1
-  mem_min = 64
+  mem_min = 128
   vol_min = 1
 
 [exp_deploy]
   rep_min = 1
   rep_max = 4
   sys_state = 1
+  failover_time = 300
   network_mode = 1
