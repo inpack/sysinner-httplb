@@ -1,6 +1,6 @@
 [project]
 name = "sysinner-httplb"
-version = "0.11.4"
+version = "0.11.5"
 vendor = "sysinner.com"
 homepage = "http://www.sysinner.com"
 description = "SysInner HTTP Load Balancer"
