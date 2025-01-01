@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/hooto/hlog4g/hlog"
+	"github.com/hooto/hmetrics"
 	"github.com/lessos/lessgo/types"
 	"golang.org/x/crypto/acme/autocert"
 
@@ -82,6 +83,36 @@ var (
 	release = "0"
 )
 
+var (
+	metricCounter = hmetrics.RegisterCounterMap(
+		"counter",
+		"The General Counter Metric",
+	)
+
+	metricGauge = hmetrics.RegisterGaugeMap(
+		"gauge",
+		"The General Gauge Metric",
+	)
+
+	metricLatency = hmetrics.RegisterHistogramMap(
+		"latency",
+		"The General Latency Metric",
+		hmetrics.NewBuckets(0.0001, 1.5, 36),
+	)
+
+	metricHistogram = hmetrics.RegisterHistogramMap(
+		"histogram",
+		"The General Histogram Metric",
+		hmetrics.NewBuckets(0.0001, 1.5, 36),
+	)
+
+	metricComplex = hmetrics.RegisterComplexMap(
+		"complex",
+		"The General Complex Metric",
+		hmetrics.NewBuckets(0.0001, 1.5, 36),
+	)
+)
+
 func init() {
 	mrand.Seed(time.Now().UnixNano())
 }
@@ -91,6 +122,43 @@ type compressWriter struct {
 	gzipWriter *gzip.Writer
 	buf        *bytes.Buffer
 	statusCode int
+}
+
+type respWriter struct {
+	http.ResponseWriter
+
+	statusCode int
+
+	writeSize int
+	writeBuff *bytes.Buffer
+
+	gzipAccept bool
+	gzipWriter *gzip.Writer
+}
+
+func (w *respWriter) Write(b []byte) (int, error) {
+
+	w.writeSize += len(b)
+
+	if w.writeBuff == nil {
+		w.writeBuff = &bytes.Buffer{}
+	}
+
+	if w.Header().Get("Content-Encoding") != "" || !w.gzipAccept {
+		return w.writeBuff.Write(b)
+	}
+
+	if w.gzipWriter == nil {
+		w.gzipWriter = gzip.NewWriter(w.writeBuff)
+	}
+
+	return w.gzipWriter.Write(b)
+}
+
+func (w *respWriter) WriteHeader(statusCode int) {
+	if statusCode > w.statusCode {
+		w.statusCode = statusCode
+	}
 }
 
 func (w *compressWriter) Write(b []byte) (int, error) {
@@ -114,6 +182,113 @@ func (w *compressWriter) Write(b []byte) (int, error) {
 func (w *compressWriter) WriteHeader(statusCode int) {
 	if statusCode > w.statusCode {
 		w.statusCode = statusCode
+	}
+}
+
+func rootHandler(w http.ResponseWriter, r *http.Request) {
+
+	var (
+		tn       = time.Now()
+		urlPath  string
+		hitRoute *PodEntryRoute
+		hw       = &respWriter{
+			ResponseWriter: w,
+		}
+	)
+
+	defer func() {
+		lat := time.Since(tn)
+		metricComplex.Add("Service", "RootHandler", 1, 0, lat)
+		if hitRoute != nil {
+			metricComplex.Add("Service", "RouteType:"+hitRoute.Type, 1, 0, lat)
+		}
+		if urlPath != "" {
+			metricComplex.Add("HostService", r.Host+":"+urlPath, 1, 0, lat)
+		}
+		metricGauge.Add("Service", "RawSize", float64(hw.writeSize))
+		if hw.writeBuff != nil {
+			metricGauge.Add("Service", "CompSize", float64(hw.writeBuff.Len()))
+		}
+	}()
+
+	if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+		hw.gzipAccept = true
+	}
+
+	handler := func(w2 http.ResponseWriter, r *http.Request) *PodEntryRoute {
+
+		if pod := getPod(r.Host); pod != nil {
+
+			//
+			urlPath = filepath.Clean(r.URL.Path)
+			if runtime.GOOS == "windows" {
+				urlPath = strings.Replace(urlPath, "\\", "/", -1)
+			}
+
+			for _, route := range pod.Routes {
+
+				if !strings.HasPrefix(urlPath, route.Path) {
+					continue
+				}
+
+				switch route.Type {
+
+				case "pod", "upstream":
+					for _, u := range route.Urls {
+						p := httputil.NewSingleHostReverseProxy(u)
+						p.ServeHTTP(w2, r)
+						return route
+					}
+
+				case "redirect":
+					w2.Header().Set("Location", route.Urls[0].String())
+					w2.WriteHeader(http.StatusFound)
+					return route
+				}
+			}
+		}
+
+		w2.Header().Set("Content-Type", "text/html")
+		w2.Write(errBody404)
+		w2.WriteHeader(404)
+
+		return nil
+	}
+
+	hitRoute = handler(hw, r)
+
+	w.Header().Del("X-Proxy")
+	w.Header().Set("X-Proxy", "InnerStack/"+version)
+
+	if hitRoute == nil {
+		return
+	}
+
+	if hw.writeBuff != nil {
+
+		if hw.gzipWriter != nil {
+			hw.gzipWriter.Flush()
+			hw.gzipWriter.Close()
+			w.Header().Set("Content-Encoding", "gzip")
+		}
+
+		if hw.writeBuff.Len() > 0 {
+			w.Header().Set("Content-Length", strconv.Itoa(hw.writeBuff.Len()))
+			if hw.statusCode > 0 {
+				w.WriteHeader(hw.statusCode)
+			}
+			w.Write(hw.writeBuff.Bytes())
+		}
+
+	} else if uri := w.Header().Get("Location"); uri != "" &&
+		w.Header().Get("Content-Type") == "" {
+		if hw.statusCode >= 300 && hw.statusCode < 310 {
+			w.WriteHeader(hw.statusCode)
+		} else {
+			w.WriteHeader(http.StatusFound)
+		}
+	} else if hw.statusCode > 0 {
+		w.WriteHeader(hw.statusCode)
 	}
 }
 
@@ -163,15 +338,15 @@ func httpHandler(w http.ResponseWriter, r *http.Request) {
 
 	if pod := getPod(r.Host); pod != nil {
 		//
-		urlpath := filepath.Clean(r.URL.Path)
+		urlPath := filepath.Clean(r.URL.Path)
 		if runtime.GOOS == "windows" {
-			urlpath = strings.Replace(urlpath, "\\", "/", -1)
+			urlPath = strings.Replace(urlPath, "\\", "/", -1)
 		}
-		// urlpath = strings.Trim(urlpath, "/")
+		// urlPath = strings.Trim(urlPath, "/")
 
 		for _, route := range pod.Routes {
 
-			if !strings.HasPrefix(urlpath, route.Path) {
+			if !strings.HasPrefix(urlPath, route.Path) {
 				continue
 			}
 
@@ -200,7 +375,9 @@ func httpHandler(w http.ResponseWriter, r *http.Request) {
 func main() {
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", cmpHandler(httpHandler))
+	// mux.HandleFunc("/", cmpHandler(httpHandler))
+	mux.HandleFunc("/", rootHandler)
+	mux.HandleFunc("/+/metrics", hmetrics.HttpHandler)
 
 	os.MkdirAll(tlsCacheDir, 0750)
 
