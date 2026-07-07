@@ -2,8 +2,6 @@ module code.hooto.com/inpack/sysinner-httplb
 
 go 1.24.0
 
-toolchain go1.24.1
-
 require (
 	github.com/hooto/hlog4g v0.9.4
 	github.com/hooto/hmetrics v0.0.1
